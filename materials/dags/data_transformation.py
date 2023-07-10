@@ -28,6 +28,7 @@ def get_voters_data_from_ncsbe(**kwargs):
     path_to_zip_file = "voter_dataset.zip"
     response = requests.get(voter_stats_link, stream=True)
     print("Status code", response.status_code)
+    print("Response text", response.text)
     with open(path_to_zip_file, "wb") as f:
         for chunk in response.iter_content(chunk_size=512):
             if chunk:  # filter out keep-alive new chunks
