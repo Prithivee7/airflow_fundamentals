@@ -23,6 +23,7 @@ def get_voters_data_from_ncsbe(**kwargs):
     """
 
     voter_stats_link = kwargs['dag_run'].conf.get('voter_stats_link')
+    print('printing link',voter_stats_link)
     path_to_zip_file = "voter_dataset.zip"
     response = requests.get(voter_stats_link, stream=True)
     with open(path_to_zip_file, "wb") as f:
