@@ -24,11 +24,8 @@ def get_voters_data_from_ncsbe(**kwargs):
 
     voter_stats_link = kwargs['dag_run'].conf.get('voter_stats_link')
     print('printing link', voter_stats_link)
-    print("type", type(voter_stats_link))
     path_to_zip_file = "voter_dataset.zip"
     response = requests.get(voter_stats_link, stream=True)
-    print("Status code", response.status_code)
-    print("Response text", response.text)
     with open(path_to_zip_file, "wb") as f:
         for chunk in response.iter_content(chunk_size=512):
             if chunk:  # filter out keep-alive new chunks
@@ -70,6 +67,7 @@ def get_final_dataframe(**kwargs):
             pd.Dataframe: Dataframe with Required Features.
 
     """
+    print("inside second task")
     df = kwargs['ti'].xcom_pull(task_ids='get_raw_data_task')
 
     df['Political Party'] = df['party_cd'].apply(
