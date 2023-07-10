@@ -24,8 +24,10 @@ def get_voters_data_from_ncsbe(**kwargs):
 
     voter_stats_link = kwargs['dag_run'].conf.get('voter_stats_link')
     print('printing link', voter_stats_link)
+    print("type", type(voter_stats_link))
     path_to_zip_file = "voter_dataset.zip"
     response = requests.get(voter_stats_link, stream=True)
+    print("Status code", response.status_code)
     with open(path_to_zip_file, "wb") as f:
         for chunk in response.iter_content(chunk_size=512):
             if chunk:  # filter out keep-alive new chunks
@@ -34,6 +36,7 @@ def get_voters_data_from_ncsbe(**kwargs):
     print("Printing contents of the directory")
     print(os.listdir())
     # Extracting the data in the zip file
+
     with zipfile.ZipFile(path_to_zip_file, 'r') as zip_ref:
         zip_ref.extractall("my_data")
 
