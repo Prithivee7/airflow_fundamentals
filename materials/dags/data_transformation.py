@@ -6,24 +6,22 @@ import requests
 import zipfile
 import os
 from datetime import datetime
+import numpy as np
+import hopsworks
 
 
 def get_voters_data_from_ncsbe(**kwargs):
     """
-    This function reads data from the voter stats link and returns the raw data.
+    This function reads data from the voter stats link and stores the raw data in a csv file.
 
     The Voter Stats link is accepted as argument during runtime and
     the zip file is unzipped and the data is read as a dataframe. 
 
     The list of the elections can be found here -> https://www.ncsbe.gov/results-data/voter-registration-data
 
-    Returns:
-        pd.Dataframe: Dataframe with Voter details(Raw).
-
     """
 
     voter_stats_link = kwargs['dag_run'].conf.get('voter_stats_link')
-    print('printing link', voter_stats_link)
     path_to_zip_file = "voter_dataset.zip"
     response = requests.get(voter_stats_link, stream=True)
     with open(path_to_zip_file, "wb") as f:
@@ -31,8 +29,6 @@ def get_voters_data_from_ncsbe(**kwargs):
             if chunk:  # filter out keep-alive new chunks
                 f.write(chunk)
 
-    print("Printing contents of the directory")
-    print(os.listdir())
     # Extracting the data in the zip file
 
     with zipfile.ZipFile(path_to_zip_file, 'r') as zip_ref:
@@ -42,33 +38,19 @@ def get_voters_data_from_ncsbe(**kwargs):
     file_name = os.listdir("my_data")[0]
     file_path = f"my_data/{file_name}"
     voters_df = pd.read_csv(file_path, delimiter=r"\t+")
-
-    print("Printing raw df columns", voters_df.columns)
-    print("Printing raw lenght of df", len(voters_df))
-    print(voters_df.head())
-
-    # Performing cleanup operation
-    os.remove(path_to_zip_file)
-    os.remove(file_path)
-    os.rmdir("my_data")
-    return voters_df
+    return file_path
 
 
-def get_final_dataframe(**kwargs):
+def get_preprocessed_dataframe(**kwargs):
     """
-        This function takes in the voters dataframe and gives back the features.
+        This function reads the rawdata and performs feature engineering and
+          stores the resultant dataframe in a csv file.
         For each feature there is a specific function in the voters.py file in the features folder.
         All these functions are called to create a feature dataframe.
 
-        Args:
-            df (pd.Dataframe): Dataframe which contains the voter information(Raw)
-
-        Returns:
-            pd.Dataframe: Dataframe with Required Features.
-
     """
-    print("inside second task")
-    df = kwargs['ti'].xcom_pull(task_ids='get_raw_data_task')
+    file_path = kwargs['ti'].xcom_pull(task_ids='get_raw_data_task')
+    df = pd.read_csv(file_path, delimiter=r"\t+")
 
     df['Political Party'] = df['party_cd'].apply(
         voters.perform_binning_political_parties)
@@ -79,10 +61,92 @@ def get_final_dataframe(**kwargs):
     df['Ethnicity'] = df['ethnic_code'].apply(voters.perform_binning_ethnicity)
     df = df[['Political Party', "County ID", "Race",
              "Age Bracket", "Sex", "Ethnicity", "total_voters"]]
-    print("Printing df columns", df.columns)
-    print("Printing lenght of df", len(df))
-    print(df.head())
-    return df
+
+    cat_csv_location = "my_data/categorical_feature_df.csv"
+    df.to_csv(cat_csv_location, index=False)
+    return cat_csv_location
+
+
+def perform_aggregation(**kwargs):
+    """
+        This function reads the  feature engineered data and
+          writes the aggregated dataframe to a csv file.
+        Aggregation is done based on the size of total_voters 
+
+    """
+    file_path = kwargs['ti'].xcom_pull(task_ids='get_preprocessed_df_task')
+    df = pd.read_csv(file_path)
+    agg_df = df.groupby([
+        'Political Party', 'Race',
+        'Age Bracket', 'Sex', "Ethnicity", "County ID"]).agg(
+        Voter_Count=('total_voters', np.size)
+    ).reset_index()
+    agg_df['p_key'] = [i for i in range(1, len(agg_df)+1)]
+
+    agg_csv_location = "my_data/aggregated_df.csv"
+    agg_df.to_csv(agg_csv_location, index=False)
+    return agg_csv_location
+
+
+def update_column_names(**kwargs):
+    """
+        This function reads the agregated data
+        and updates the name of the features 
+        and stores the resultant data to a csv file.
+        This function is called to comply with Hopsworks's naming convention specification.
+
+    """
+    file_path = kwargs['ti'].xcom_pull(task_ids='get_aggregated_df_task')
+    df = pd.read_csv(file_path)
+    df.columns = ['political_party', 'race', 'age_bracket', 'sex', 'ethnicity',
+                  'county_id', 'voter_count', 'p_key']
+
+    final_csv_location = "my_data/final_df.csv"
+    df.to_csv(final_csv_location, index=False)
+    return final_csv_location
+
+
+def push_data_to_feature_store(**kwargs):
+    """
+    This function reads the feature store ready data 
+    and pushes it into the feature store
+    """
+    file_path = kwargs['ti'].xcom_pull(task_ids='update_columns_task')
+    df = pd.read_csv(file_path)
+
+    # Loging to hopsworks
+    hopsworks_project = hopsworks.login()
+    fs = hopsworks_project.get_feature_store()
+
+    voters_fg = fs.get_or_create_feature_group(
+        name="voterdata",
+        version=1,
+        description="Voter data with categorical variables and aggregation",
+        primary_key=['p_key'],
+        online_enabled=True
+    )
+
+    voters_fg.insert(df)
+
+    feature_descriptions = [
+        {"name": "political_party",
+            "description": "It bins the political party into the Democratic, Republic and Others"},
+        {"name": "race", "description": "Contains information about the Race of the voter"},
+        {"name": "age_bracket",
+            "description": "Contains information about the age bracket to which the voter belongs"},
+        {"name": "sex", "description": "Contains information regarding the sex of the voter"},
+        {"name": "ethnicity",
+            "description": "Contains information about the ethnicity of the voter"},
+        {"name": "county_id",
+            "description": "Contains information about the county id of the voter"},
+        {"name": "voter_count",
+            "description": "Contains information regarding the number of voters"},
+        {"name": "p_key", "description": "This feature is used as a primary key"},
+    ]
+
+    for desciption in feature_descriptions:
+        voters_fg.update_feature_description(
+            desciption["name"], desciption["description"])
 
 
 with DAG('data_transformation', start_date=datetime(2023, 1, 1), schedule_interval='@daily', catchup=False) as dag:
@@ -93,9 +157,24 @@ with DAG('data_transformation', start_date=datetime(2023, 1, 1), schedule_interv
         provide_context=True
     )
 
-    get_final_df_task = PythonOperator(
-        task_id='get_final_df_task',
-        python_callable=get_final_dataframe,
+    get_preprocessed_df_task = PythonOperator(
+        task_id='get_preprocessed_df_task',
+        python_callable=get_preprocessed_dataframe,
     )
 
-    get_raw_data_task >> get_final_df_task
+    get_aggregated_df_task = PythonOperator(
+        task_id='get_aggregated_df_task',
+        python_callable=perform_aggregation,
+    )
+
+    update_columns_task = PythonOperator(
+        task_id='update_columns_task',
+        python_callable=update_column_names,
+    )
+
+    push_to_fs_task = PythonOperator(
+        task_id='push_to_fs_task',
+        python_callable=push_data_to_feature_store,
+    )
+
+    get_raw_data_task >> get_preprocessed_df_task >> get_aggregated_df_task >> update_columns_task >> push_to_fs_task
